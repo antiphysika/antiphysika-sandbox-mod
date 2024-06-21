@@ -1,0 +1,259 @@
+import groovy.json.JsonSlurper
+import groovy.transform.EqualsAndHashCode
+import groovy.transform.TupleConstructor
+
+plugins {
+    id 'java-gradle-plugin'
+    id 'maven-publish'
+    id "net.neoforged.gradleutils" version "3.0.0-alpha.13"
+    id 'com.gradle.plugin-publish' version '1.1.0'
+    id 'io.github.goooler.shadow' version '8.1.7'
+}
+
+group = 'net.neoforged'
+base {
+    archivesName = "moddev-gradle"
+}
+gradleutils.version {
+    branches.suffixBranch()
+}
+project.version = gradleutils.version
+
+changelog {
+    from '0.1'
+    // For fine-grained changelog publication control
+    disableAutomaticPublicationRegistration()
+}
+
+if (System.getenv('GPP_KEY')) {
+    project.ext {
+        set('gradle.publish.key', System.getenv('GPP_KEY'))
+        set('gradle.publish.secret', System.getenv('GPP_SECRET'))
+    }
+}
+
+repositories {
+    exclusiveContent {
+        forRepository {
+            maven {
+                name = "Fabric"
+                url = "https://maven.fabricmc.net/"
+            }
+        }
+        filter {
+            includeModule("net.fabricmc", "fabric-loom-native")
+        }
+    }
+    maven {
+        name = "NeoForged"
+        url = "https://maven.neoforged.net/releases"
+        content {
+            includeGroup "net.neoforged"
+        }
+    }
+    mavenCentral()
+    gradlePluginPortal()
+}
+
+sourceSets {
+    java8
+    main {
+        java {
+            srcDirs += project.file('src/generated/java')
+        }
+        compileClasspath += java8.output
+        runtimeClasspath += java8.output
+    }
+}
+
+configurations {
+    // Configuration for all dependencies that we want shaded.
+    shaded
+    // Place shaded dependencies into `compileOnly` so that they do not leak into our publications' dependencies.
+    compileOnly.extendsFrom shaded
+    shadowRuntimeElements {
+        // `shadowRuntimeElements` is what gets published.
+        // We want it to contain the non-shaded runtime dependencies.
+        it.extendsFrom implementation, runtimeOnly
+    }
+    // Change the Category attribute so that includeBuilds don't select the default `runtimeElements` configuration.
+    // The Plugin Publish plugin already disables Maven publication of this configuration automatically.
+    runtimeElements {
+        attributes {
+            attribute(Category.CATEGORY_ATTRIBUTE, objects.named(Category, "not-wanted-publication"))
+        }
+    }
+}
+
+dependencies {
+    compileOnly gradleApi()
+    compileOnly "com.intellij:annotations:9.0.4"
+    shaded "com.google.code.gson:gson:2.10.1"
+    implementation "gradle.plugin.org.jetbrains.gradle.plugin.idea-ext:gradle-idea-ext:1.1.8"
+    shaded "net.neoforged:EclipseLaunchConfigs:0.1.11"
+    shaded("net.neoforged:JarJarMetadata:0.4.2") {
+        exclude group: 'org.slf4j'
+    }
+
+    java8CompileOnly gradleApi()
+
+    testImplementation(enforcedPlatform("org.junit:junit-bom:5.10.2"))
+    testImplementation 'org.junit.jupiter:junit-jupiter-api'
+    testImplementation 'org.junit.jupiter:junit-jupiter-params'
+    testImplementation 'org.assertj:assertj-core:3.25.1'
+    testImplementation gradleTestKit()
+    testRuntimeOnly 'org.junit.jupiter:junit-jupiter-engine'
+    testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
+}
+
+java {
+    toolchain {
+        languageVersion = JavaLanguageVersion.of(17)
+    }
+    withSourcesJar()
+}
+
+jar {
+    from sourceSets.java8.output
+}
+
+shadowJar {
+    archiveClassifier = "" // Required for the Plugin Publish Plugin to publish this jar
+
+    from sourceSets.java8.output
+
+    configurations = [project.configurations.shaded]
+    enableRelocation true
+    relocationPrefix = "net.neoforged.moddev.shadow"
+}
+
+assemble.dependsOn shadowJar
+
+tasks.named("compileJava8Java").configure {
+    javaCompiler = javaToolchains.compilerFor {
+        languageVersion = JavaLanguageVersion.of(8)
+    }
+}
+
+javadoc {
+    options.addBooleanOption("Xdoclint:all,-missing", true)
+}
+
+// This is a shameless ripoff from Fabric Loom:
+// https://github.com/FabricMC/fabric-loom/blob/dev/1.6/build.gradle
+// Need to tweak this file to pretend we are compatible with j8 so the bootstrap will run.
+tasks.withType(GenerateModuleMetadata) {
+    doLast {
+        def file = outputFile.get().asFile
+
+        def metadata = new groovy.json.JsonSlurper().parseText(file.text)
+
+        metadata.variants.each {
+            it.attributes["org.gradle.jvm.version"] = 8
+        }
+
+        file.text = groovy.json.JsonOutput.toJson(metadata)
+    }
+}
+
+gradlePlugin {
+    website = 'https://github.com/neoforged/ModDevGradle'
+    vcsUrl  = 'https://github.com/neoforged/ModDevGradle.git'
+
+    plugins {
+        moddev {
+            id = 'net.neoforged.moddev'
+            implementationClass = 'net.neoforged.moddevgradle.boot.ModDevPlugin'
+            displayName = "NeoForge Mod Development Plugin"
+            description = "This plugin helps you create Minecraft mods using the NeoForge platform"
+            tags = ["minecraft", "neoforge", "java", "mod"]
+        }
+        repositories {
+            id = 'net.neoforged.moddev.repositories'
+            implementationClass = 'net.neoforged.moddevgradle.boot.RepositoriesPlugin'
+            displayName = "NeoForge Mod Development Repositories Plugin"
+            description = "This plugin adds the repositories needed for developing Minecraft mods. It is applied automatically by the moddev plugin, but can be applied manually in settings.gradle to make use of Gradle dependency management."
+            tags = ["minecraft", "neoforge", "java", "mod"]
+        }
+    }
+}
+
+test {
+    useJUnitPlatform()
+}
+
+publishing {
+    repositories {
+        maven {
+            name = 'NeoForge'
+            if (System.getenv('MAVEN_USER') && System.getenv('MAVEN_PASSWORD')) {
+                it.url = "https://maven.neoforged.net/releases/"
+                it.authentication {
+                    it.create('basic', BasicAuthentication)
+                }
+                it.credentials { credentials ->
+                    credentials.username = System.getenv('MAVEN_USER')
+                    credentials.password = System.getenv('MAVEN_PASSWORD')
+                }
+            } else {
+                it.url = 'file://' + file("repo").getAbsolutePath()
+            }
+        }
+    }
+}
+
+// By default, the testkit will use sourceSets.main.runtimeClasspath (= the configuration + the source set's outputs).
+// That contains the non-shaded plugin classes, and does not contain our shaded dependencies!
+// Instead, let's use the shadow jar and configurations.runtimeClasspath.
+tasks.withType(PluginUnderTestMetadata).configureEach {
+    it.pluginClasspath.setFrom tasks.shadowJar, configurations.runtimeClasspath
+}
+
+abstract class GenerateRepoFilter extends DefaultTask {
+    @OutputFile
+    abstract RegularFileProperty getOutput()
+
+    @EqualsAndHashCode
+    @TupleConstructor
+    static class Artifact implements Comparable<Artifact>  {
+        String group, module
+
+        @Override
+        int compareTo(Artifact o) {
+            final groups = this.group <=> o.group
+            if (groups) return groups
+            return this.module <=> o.module
+        }
+    }
+
+    @TaskAction
+    void run() {
+        final Set<Artifact> artifacts = []
+        final json = new JsonSlurper()
+        final manifest = json.parse('https://piston-meta.mojang.com/mc/game/version_manifest_v2.json'.toURL())
+        manifest.versions.each { ver ->
+            final version = json.parse((ver.url as String).toURL())
+            version.libraries.each { lib ->
+                final location = (lib.name as String).split(':', 3)
+                artifacts.add(new Artifact(location[0], location[1]))
+            }
+        }
+        final artifactList = artifacts.toList()
+        Collections.sort(artifactList)
+        final clazz = """
+package net.neoforged.moddevgradle.internal.generated;
+
+public class MojangRepositoryFilter {
+    public static void filter(org.gradle.api.artifacts.repositories.RepositoryContentDescriptor filter) {
+${artifactList.collect { "        filter.includeModule(\"${it.group}\", \"${it.module}\");" }.join('\n')}
+    }
+}"""
+        output.get().asFile.write(clazz)
+    }
+}
+
+tasks.register('generateMojangRepositoryFilter', GenerateRepoFilter) {
+    output = project.file('src/generated/java/net/neoforged/moddevgradle/internal/generated/MojangRepositoryFilter.java')
+    group = 'build'
+    description = "Generates a repository filter for Mojang's libraries maven"
+}
